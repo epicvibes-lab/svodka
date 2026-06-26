@@ -1,195 +1,191 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<meta name="theme-color" content="#EBEEF1">
-<title>Сводка</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --bg:#EBEEF1; --surface:#FFFFFF; --ink:#16242C; --muted:#647480; --faint:#94A2AC;
-    --line:#DCE2E7; --accent:#1F6E6A; --accent-soft:#E2EFEE;
-    --shadow:0 1px 2px rgba(22,36,44,.04), 0 8px 24px rgba(22,36,44,.05);
-    --display:'Golos Text',system-ui,'Segoe UI',sans-serif;
-    --body:'Inter',system-ui,'Segoe UI',sans-serif;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  html{-webkit-text-size-adjust:100%}
-  body{
-    font-family:var(--body); background:var(--bg); color:var(--ink); line-height:1.5;
-    -webkit-font-smoothing:antialiased;
-    padding:max(20px,env(safe-area-inset-top)) 16px calc(40px + env(safe-area-inset-bottom));
-    min-height:100vh;
-  }
-  .wrap{max-width:560px;margin:0 auto}
+// Сборщик сводки v2: RSS -> дедупликация -> отбор + связи через Claude Haiku.
+// Пишет: svodka.json (текущий снимок), archive/<дата>.json (архив),
+// index.json (индекс прошлых событий для связей), archive/list.json (список дат).
+// Требует переменную окружения ANTHROPIC_API_KEY.
 
-  header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:8px 4px 20px}
-  .brand h1{font-family:var(--display);font-weight:800;font-size:34px;letter-spacing:.14em;line-height:1}
-  .brand .date{margin-top:9px;color:var(--muted);font-size:13.5px;text-transform:lowercase;letter-spacing:.01em}
-  .brand .upd{margin-top:3px;color:var(--faint);font-size:12px}
-  .refresh{flex:0 0 auto;width:42px;height:42px;border-radius:50%;border:1px solid var(--line);
-    background:var(--surface);color:var(--accent);cursor:pointer;display:grid;place-items:center;
-    transition:transform .2s ease, box-shadow .2s ease, border-color .2s ease}
-  .refresh:hover{box-shadow:var(--shadow);border-color:var(--accent)}
-  .refresh:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  .refresh:active{transform:scale(.94)}
-  .refresh svg{width:19px;height:19px}
-  .refresh.spinning svg{animation:spin 1s linear infinite}
-  @keyframes spin{to{transform:rotate(360deg)}}
+import Parser from 'rss-parser';
+import { writeFile, readFile, mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
-  .filters{display:flex;gap:7px;flex-wrap:wrap;padding:0 4px 18px}
-  .chip{font-family:var(--body);font-size:13px;font-weight:500;padding:6px 13px;border-radius:999px;
-    cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--muted);transition:all .15s ease}
-  .chip:hover{border-color:var(--accent);color:var(--accent)}
-  .chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  .chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+// ── Настройки ──────────────────────────────────────────────────────────────
+const MODEL = 'claude-haiku-4-5';
+const PICK = 6;                 // сколько новостей в сводке
+const MAX_CANDIDATES = 45;      // кандидатов на отбор
+const FRESH_HOURS = 36;         // окно свежести
+const INDEX_DAYS = 21;          // сколько дней прошлых событий держать для связей
 
-  .feed{display:flex;flex-direction:column;gap:12px}
-  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px 20px 17px;box-shadow:var(--shadow)}
-  .card .eyebrow{display:inline-block;font-size:11.5px;font-weight:600;letter-spacing:.09em;
-    text-transform:uppercase;color:var(--accent);margin-bottom:9px}
-  .card h2{font-family:var(--display);font-weight:600;font-size:19px;line-height:1.3;letter-spacing:-.01em;margin-bottom:8px}
-  .card p{font-size:14.5px;color:#33424B;line-height:1.55}
-  .card .meta{display:flex;align-items:center;gap:8px;margin-top:13px;padding-top:13px;
-    border-top:1px solid var(--line);font-size:12.5px;color:var(--faint)}
-  .card .meta .src{color:var(--muted);font-weight:500}
-  .card .meta .dot{width:3px;height:3px;border-radius:50%;background:var(--faint)}
+const FEEDS = [
+  'https://news.google.com/rss/headlines/section/topic/WORLD?hl=ru&gl=RU&ceid=RU:ru',
+  'https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=ru&gl=RU&ceid=RU:ru',
+  'https://news.google.com/rss/search?q=%D0%BF%D0%BE%D0%BB%D0%B8%D1%82%D0%B8%D0%BA%D0%B0&hl=ru&gl=RU&ceid=RU:ru',
+  'https://feeds.bbci.co.uk/russian/rss.xml',
+];
 
-  .reveal{opacity:0;transform:translateY(10px);animation:rise .5s ease forwards}
-  @keyframes rise{to{opacity:1;transform:none}}
+// ── Утилиты ──────────────────────────────────────────────────────────────────
+const parser = new Parser({ timeout: 15000, headers: { 'User-Agent': 'svodka-bot/1.0' } });
 
-  .ending{text-align:center;padding:38px 16px 8px}
-  .ending .rule{width:34px;height:2px;background:var(--accent);margin:0 auto 16px;border-radius:2px}
-  .ending .big{font-family:var(--display);font-weight:600;font-size:16px;letter-spacing:.02em;color:var(--ink)}
-  .ending .sub{margin-top:6px;font-size:13px;color:var(--muted)}
-
-  .status{padding:48px 12px;text-align:center}
-  .status .pulse{font-family:var(--display);font-weight:600;font-size:15px;color:var(--muted)}
-  .skel{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:12px}
-  .skel .l{height:11px;border-radius:6px;background:linear-gradient(90deg,#EEF1F3 25%,#E3E8EB 37%,#EEF1F3 63%);background-size:400% 100%;animation:shimmer 1.4s infinite}
-  .skel .l.s{width:30%;height:9px;margin-bottom:14px}
-  .skel .l.m{width:85%;height:15px;margin-bottom:10px}
-  .skel .l.n{width:96%}
-  .skel .l.o{width:60%;margin-top:8px}
-  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
-
-  .errbox{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:26px 22px;text-align:center;box-shadow:var(--shadow)}
-  .errbox h3{font-family:var(--display);font-weight:600;font-size:17px;margin-bottom:7px}
-  .errbox p{font-size:14px;color:var(--muted);margin-bottom:18px}
-  .errbox button{font-family:var(--body);font-size:14px;font-weight:600;padding:10px 22px;border-radius:999px;cursor:pointer;background:var(--ink);color:#fff;border:none}
-  .errbox button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-
-  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.reveal{opacity:1;transform:none}}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <header>
-    <div class="brand">
-      <h1>СВОДКА</h1>
-      <div class="date" id="date">—</div>
-      <div class="upd" id="upd"></div>
-    </div>
-    <button class="refresh" id="refresh" aria-label="Обновить" title="Обновить">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
-      </svg>
-    </button>
-  </header>
-
-  <div class="filters" id="filters" hidden></div>
-  <main id="feed"></main>
-</div>
-
-<script>
-const CATEGORIES = ['Всё','Мир','Политика','Экономика','Конфликты'];
-const feed = document.getElementById('feed');
-const filtersEl = document.getElementById('filters');
-const refreshBtn = document.getElementById('refresh');
-let allItems = [], activeFilter = 'Всё';
-
-(function setDate(){
-  const now = new Date();
-  const ds = now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});
-  const part = now.getHours() < 12 ? 'утро' : now.getHours() < 18 ? 'день' : 'вечер';
-  document.getElementById('date').textContent = ds + ' · ' + part;
-})();
-
-function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-
-function showLoading(){
-  filtersEl.hidden = true;
-  feed.innerHTML =
-    '<div class="status"><div class="pulse">Открываю сводку</div></div>' +
-    Array(4).fill('<div class="skel"><div class="l s"></div><div class="l m"></div><div class="l n"></div><div class="l o"></div></div>').join('');
+function sourceFromItem(item){
+  if (item.source && typeof item.source === 'object' && item.source._) return item.source._;
+  if (item.source && typeof item.source === 'string') return item.source;
+  const m = (item.title || '').match(/\s-\s([^-]{2,40})$/);
+  return m ? m[1].trim() : '';
+}
+function cleanTitle(t){ return (t||'').replace(/\s-\s[^-]{2,40}$/,'').trim(); }
+function normKey(t){
+  return cleanTitle(t).toLowerCase().replace(/[«»"'`.,:;!?()\[\]—–-]/g,' ')
+    .replace(/\s+/g,' ').trim().split(' ').slice(0,6).join(' ');
+}
+function makeId(title, dateStr){
+  const h = createHash('sha1').update(normKey(title)).digest('hex').slice(0,6);
+  return 'e' + dateStr.replace(/-/g,'') + '-' + h;
+}
+function ageRu(iso){
+  if(!iso) return 'сегодня';
+  const diff = Date.now() - Date.parse(iso);
+  if(Number.isNaN(diff)) return 'сегодня';
+  const h = Math.floor(diff/3600000);
+  if(h<1) return 'только что';
+  if(h<24) return `${h} ч назад`;
+  return 'сегодня';
+}
+async function readJson(path, fallback){
+  try { return JSON.parse(await readFile(path,'utf8')); } catch { return fallback; }
+}
+function extractJson(text){
+  let t=(text||'').trim().replace(/```json/gi,'').replace(/```/g,'').trim();
+  const a=t.indexOf('['), b=t.lastIndexOf(']');
+  if(a!==-1&&b!==-1&&b>a) t=t.slice(a,b+1);
+  return JSON.parse(t);
 }
 
-function showError(msg){
-  filtersEl.hidden = true;
-  feed.innerHTML = '<div class="errbox"><h3>Сводка не загрузилась</h3><p>'+escapeHtml(msg)+'</p><button id="retry">Попробовать снова</button></div>';
-  document.getElementById('retry').addEventListener('click', load);
+// ── Сбор RSS ──────────────────────────────────────────────────────────────────
+async function collect(){
+  const cutoff = Date.now() - FRESH_HOURS*3600*1000;
+  const seen = new Set();
+  const items = [];
+  for(const url of FEEDS){
+    try{
+      const feed = await parser.parseURL(url);
+      for(const it of feed.items||[]){
+        const when = it.isoDate ? Date.parse(it.isoDate) : NaN;
+        if(!Number.isNaN(when) && when < cutoff) continue;
+        const key = normKey(it.title);
+        if(!key || seen.has(key)) continue;
+        seen.add(key);
+        items.push({
+          title: cleanTitle(it.title),
+          source: sourceFromItem(it) || 'источник',
+          snippet: (it.contentSnippet||'').replace(/\s+/g,' ').slice(0,220),
+          iso: it.isoDate || '',
+        });
+      }
+    }catch(e){ console.error('Лента недоступна:', url, '—', e.message); }
+  }
+  items.sort((a,b)=>(Date.parse(b.iso)||0)-(Date.parse(a.iso)||0));
+  return items.slice(0, MAX_CANDIDATES);
 }
 
-function renderFilters(){
-  filtersEl.hidden = false;
-  filtersEl.innerHTML = CATEGORIES.map(c => '<button class="chip'+(c===activeFilter?' on':'')+'" data-cat="'+c+'">'+c+'</button>').join('');
-  filtersEl.querySelectorAll('.chip').forEach(btn=>{
-    btn.addEventListener('click', ()=>{ activeFilter = btn.dataset.cat; renderFilters(); renderFeed(); });
+// ── Отбор + связи через Claude ────────────────────────────────────────────────
+async function summarize(candidates, index){
+  const key = process.env.ANTHROPIC_API_KEY;
+  if(!key) throw new Error('Нет ANTHROPIC_API_KEY. Добавьте его в секреты репозитория.');
+
+  const list = candidates
+    .map((c,i)=>`${i+1}. [${c.source}] ${c.title}${c.snippet?' — '+c.snippet:''}`).join('\n');
+
+  const past = index.slice(-60)
+    .map(e=>`${e.id} | ${e.date} | ${e.title}`).join('\n') || '(пусто)';
+
+  const prompt =
+    'Ты — редактор утренней новостной сводки. Ниже СПИСОК свежих заголовков из RSS за сутки и ИНДЕКС прошлых событий.\n\n' +
+    'Задача 1 — отбор. Выбери ' + PICK + ' действительно самых важных мировых и политических событий: ' +
+    'большая политика, международные отношения, конфликты, крупная экономика. В приоритете то, что широко освещается. ' +
+    'Игнорируй развлечения, спорт, светскую хронику и мелочи.\n\n' +
+    'Задача 2 — связи. Для каждого выбранного события реши, является ли оно ПРЯМЫМ продолжением, реакцией или ' +
+    'следствием одного из событий ИНДЕКСА. Связывай ТОЛЬКО при реальном продолжении сюжета (те же действующие лица и линия), ' +
+    'а не просто при совпадении темы. Если связи нет — ставь null. Никогда не выдумывай id, которого нет в индексе.\n\n' +
+    'Для каждого события верни объект:\n' +
+    '"title" — краткий заголовок (до 9 слов, без точки в конце),\n' +
+    '"summary" — РОВНО одно предложение: что случилось и почему важно,\n' +
+    '"category" — одно из: Мир, Политика, Экономика, Конфликты,\n' +
+    '"source" — издание из списка,\n' +
+    '"prev_id" — точный id из индекса или null,\n' +
+    '"relation" — если есть связь: одно слово (продолжение / реакция / следствие), иначе null.\n\n' +
+    'Все тексты на русском. Ответь ТОЛЬКО валидным JSON-массивом из ' + PICK + ' объектов, без markdown и пояснений.\n\n' +
+    'ИНДЕКС ПРОШЛЫХ СОБЫТИЙ:\n' + past + '\n\nСПИСОК:\n' + list;
+
+  const res = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{ 'x-api-key':key, 'anthropic-version':'2023-06-01', 'content-type':'application/json' },
+    body: JSON.stringify({ model:MODEL, max_tokens:1800, messages:[{role:'user',content:prompt}] }),
   });
-}
-
-function renderFeed(){
-  const items = activeFilter==='Всё' ? allItems : allItems.filter(x=>x.category===activeFilter);
-  if(!items.length){
-    feed.innerHTML = '<div class="ending"><div class="rule"></div><div class="big">В этой рубрике пока тихо</div><div class="sub">Выберите «Всё», чтобы увидеть полную сводку.</div></div>';
-    return;
+  if(!res.ok){
+    const body = await res.text().catch(()=>'');
+    throw new Error(`Anthropic API ${res.status}: ${body.slice(0,300)}`);
   }
-  const cards = items.map((it,idx)=>
-    '<article class="card reveal" style="animation-delay:'+(idx*55)+'ms">'+
-      '<span class="eyebrow">'+escapeHtml(it.category||'Новость')+'</span>'+
-      '<h2>'+escapeHtml(it.title)+'</h2>'+
-      '<p>'+escapeHtml(it.summary)+'</p>'+
-      '<div class="meta"><span class="src">'+escapeHtml(it.source||'источники')+'</span>'+
-      (it.time_ago?'<span class="dot"></span><span>'+escapeHtml(it.time_ago)+'</span>':'')+'</div>'+
-    '</article>'
-  ).join('');
-  const ending =
-    '<div class="ending reveal" style="animation-delay:'+(items.length*55+80)+'ms">'+
-      '<div class="rule"></div><div class="big">Конец сводки</div>'+
-      '<div class="sub">Это всё важное на сейчас. Можно отложить телефон.</div></div>';
-  feed.innerHTML = '<div class="feed">'+cards+'</div>'+ending;
+  const data = await res.json();
+  const text = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+  const picked = extractJson(text);
+  if(!Array.isArray(picked)||!picked.length) throw new Error('Модель вернула пустой результат.');
+  return picked.filter(p=>p&&p.title&&p.summary);
 }
 
-async function load(){
-  showLoading();
-  refreshBtn.classList.add('spinning');
-  try{
-    // ?t= — чтобы браузер не показывал устаревшую кэшированную версию
-    const res = await fetch('./svodka.json?t=' + Date.now(), { cache: 'no-store' });
-    if(res.status === 404) throw new Error('Файл svodka.json ещё не создан. Запустите сборку в Actions (Run workflow).');
-    if(!res.ok) throw new Error('Не удалось загрузить svodka.json ('+res.status+').');
-    const data = await res.json();
-    allItems = Array.isArray(data.items) ? data.items.filter(x=>x && x.title && x.summary) : [];
-    if(!allItems.length) throw new Error('Сводка пуста. Проверьте лог последней сборки в Actions.');
-    if(data.updated){
-      const u = new Date(data.updated);
-      document.getElementById('upd').textContent = 'обновлено ' + u.toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+// ── Главное ──────────────────────────────────────────────────────────────────
+async function main(){
+  const dateStr = new Date().toISOString().slice(0,10);
+
+  const candidates = await collect();
+  console.log(`Кандидатов после дедупликации: ${candidates.length}`);
+  if(!candidates.length) throw new Error('RSS не дал свежих новостей. Прерываюсь, чтобы не затирать сводку.');
+
+  const index = await readJson('index.json', []);
+  const indexById = new Map(index.map(e=>[e.id,e]));
+
+  const picked = await summarize(candidates, index);
+
+  const items = picked.map(p=>{
+    const id = makeId(p.title, dateStr);
+    let prev = null;
+    if(p.prev_id && indexById.has(p.prev_id)){
+      const pe = indexById.get(p.prev_id);
+      prev = { id: pe.id, title: pe.title, date: pe.date, relation: (p.relation||'продолжение') };
     }
-    activeFilter = 'Всё';
-    renderFilters();
-    renderFeed();
-  }catch(err){
-    showError(err.message || 'Что-то пошло не так.');
-  }finally{
-    refreshBtn.classList.remove('spinning');
-  }
+    const match = candidates.find(c=>normKey(c.title)===normKey(p.title));
+    return {
+      id,
+      title: String(p.title),
+      summary: String(p.summary),
+      category: String(p.category||'Мир'),
+      source: String(p.source || (match?match.source:'источники')),
+      time_ago: match ? ageRu(match.iso) : 'сегодня',
+      prev,
+    };
+  });
+
+  const snapshot = { updated: new Date().toISOString(), date: dateStr, items };
+
+  await writeFile('svodka.json', JSON.stringify(snapshot, null, 2), 'utf8');
+
+  await mkdir('archive', { recursive: true });
+  await writeFile(`archive/${dateStr}.json`, JSON.stringify(snapshot, null, 2), 'utf8');
+
+  const dates = await readJson('archive/list.json', []);
+  if(!dates.includes(dateStr)) dates.push(dateStr);
+  dates.sort().reverse();
+  await writeFile('archive/list.json', JSON.stringify(dates, null, 2), 'utf8');
+
+  const cutoffDay = new Date(Date.now() - INDEX_DAYS*86400000).toISOString().slice(0,10);
+  const merged = new Map(index.map(e=>[e.id,e]));
+  for(const it of items) merged.set(it.id, { id:it.id, title:it.title, date:dateStr, category:it.category });
+  const nextIndex = [...merged.values()].filter(e=>e.date >= cutoffDay)
+    .sort((a,b)=> a.date<b.date?-1:a.date>b.date?1:0);
+  await writeFile('index.json', JSON.stringify(nextIndex, null, 2), 'utf8');
+
+  const linked = items.filter(i=>i.prev).length;
+  console.log(`Готово: ${items.length} новостей (${linked} со связями) за ${dateStr}.`);
 }
 
-refreshBtn.addEventListener('click', load);
-load();
-</script>
-</body>
-</html>
+main().catch(err=>{
+  console.error('Сборка не удалась:', err.message);
+  process.exit(1);
+});
