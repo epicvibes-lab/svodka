@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#EBEEF1">
+<title>Сводка</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#EBEEF1; --surface:#FFFFFF; --ink:#16242C; --muted:#647480; --faint:#94A2AC;
+    --line:#DCE2E7; --accent:#1F6E6A; --accent-soft:#E2EFEE;
+    --shadow:0 1px 2px rgba(22,36,44,.04), 0 8px 24px rgba(22,36,44,.05);
+    --display:'Golos Text',system-ui,'Segoe UI',sans-serif;
+    --body:'Inter',system-ui,'Segoe UI',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    font-family:var(--body); background:var(--bg); color:var(--ink); line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    padding:max(20px,env(safe-area-inset-top)) 16px calc(40px + env(safe-area-inset-bottom));
+    min-height:100vh;
+  }
+  .wrap{max-width:560px;margin:0 auto}
+
+  header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:8px 4px 20px}
+  .brand h1{font-family:var(--display);font-weight:800;font-size:34px;letter-spacing:.14em;line-height:1}
+  .brand .date{margin-top:9px;color:var(--muted);font-size:13.5px;text-transform:lowercase;letter-spacing:.01em}
+  .brand .upd{margin-top:3px;color:var(--faint);font-size:12px}
+  .refresh{flex:0 0 auto;width:42px;height:42px;border-radius:50%;border:1px solid var(--line);
+    background:var(--surface);color:var(--accent);cursor:pointer;display:grid;place-items:center;
+    transition:transform .2s ease, box-shadow .2s ease, border-color .2s ease}
+  .refresh:hover{box-shadow:var(--shadow);border-color:var(--accent)}
+  .refresh:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .refresh:active{transform:scale(.94)}
+  .refresh svg{width:19px;height:19px}
+  .refresh.spinning svg{animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .filters{display:flex;gap:7px;flex-wrap:wrap;padding:0 4px 18px}
+  .chip{font-family:var(--body);font-size:13px;font-weight:500;padding:6px 13px;border-radius:999px;
+    cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--muted);transition:all .15s ease}
+  .chip:hover{border-color:var(--accent);color:var(--accent)}
+  .chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+
+  .feed{display:flex;flex-direction:column;gap:12px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px 20px 17px;box-shadow:var(--shadow)}
+  .card .eyebrow{display:inline-block;font-size:11.5px;font-weight:600;letter-spacing:.09em;
+    text-transform:uppercase;color:var(--accent);margin-bottom:9px}
+  .card h2{font-family:var(--display);font-weight:600;font-size:19px;line-height:1.3;letter-spacing:-.01em;margin-bottom:8px}
+  .card p{font-size:14.5px;color:#33424B;line-height:1.55}
+  .card .meta{display:flex;align-items:center;gap:8px;margin-top:13px;padding-top:13px;
+    border-top:1px solid var(--line);font-size:12.5px;color:var(--faint)}
+  .card .meta .src{color:var(--muted);font-weight:500}
+  .card .meta .dot{width:3px;height:3px;border-radius:50%;background:var(--faint)}
+
+  .reveal{opacity:0;transform:translateY(10px);animation:rise .5s ease forwards}
+  @keyframes rise{to{opacity:1;transform:none}}
+
+  .ending{text-align:center;padding:38px 16px 8px}
+  .ending .rule{width:34px;height:2px;background:var(--accent);margin:0 auto 16px;border-radius:2px}
+  .ending .big{font-family:var(--display);font-weight:600;font-size:16px;letter-spacing:.02em;color:var(--ink)}
+  .ending .sub{margin-top:6px;font-size:13px;color:var(--muted)}
+
+  .status{padding:48px 12px;text-align:center}
+  .status .pulse{font-family:var(--display);font-weight:600;font-size:15px;color:var(--muted)}
+  .skel{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;margin-bottom:12px}
+  .skel .l{height:11px;border-radius:6px;background:linear-gradient(90deg,#EEF1F3 25%,#E3E8EB 37%,#EEF1F3 63%);background-size:400% 100%;animation:shimmer 1.4s infinite}
+  .skel .l.s{width:30%;height:9px;margin-bottom:14px}
+  .skel .l.m{width:85%;height:15px;margin-bottom:10px}
+  .skel .l.n{width:96%}
+  .skel .l.o{width:60%;margin-top:8px}
+  @keyframes shimmer{0%{background-position:100% 0}100%{background-position:-100% 0}}
+
+  .errbox{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:26px 22px;text-align:center;box-shadow:var(--shadow)}
+  .errbox h3{font-family:var(--display);font-weight:600;font-size:17px;margin-bottom:7px}
+  .errbox p{font-size:14px;color:var(--muted);margin-bottom:18px}
+  .errbox button{font-family:var(--body);font-size:14px;font-weight:600;padding:10px 22px;border-radius:999px;cursor:pointer;background:var(--ink);color:#fff;border:none}
+  .errbox button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.reveal{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <h1>СВОДКА</h1>
+      <div class="date" id="date">—</div>
+      <div class="upd" id="upd"></div>
+    </div>
+    <button class="refresh" id="refresh" aria-label="Обновить" title="Обновить">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>
+      </svg>
+    </button>
+  </header>
+
+  <div class="filters" id="filters" hidden></div>
+  <main id="feed"></main>
+</div>
+
+<script>
+const CATEGORIES = ['Всё','Мир','Политика','Экономика','Конфликты'];
+const feed = document.getElementById('feed');
+const filtersEl = document.getElementById('filters');
+const refreshBtn = document.getElementById('refresh');
+let allItems = [], activeFilter = 'Всё';
+
+(function setDate(){
+  const now = new Date();
+  const ds = now.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});
+  const part = now.getHours() < 12 ? 'утро' : now.getHours() < 18 ? 'день' : 'вечер';
+  document.getElementById('date').textContent = ds + ' · ' + part;
+})();
+
+function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+function showLoading(){
+  filtersEl.hidden = true;
+  feed.innerHTML =
+    '<div class="status"><div class="pulse">Открываю сводку</div></div>' +
+    Array(4).fill('<div class="skel"><div class="l s"></div><div class="l m"></div><div class="l n"></div><div class="l o"></div></div>').join('');
+}
+
+function showError(msg){
+  filtersEl.hidden = true;
+  feed.innerHTML = '<div class="errbox"><h3>Сводка не загрузилась</h3><p>'+escapeHtml(msg)+'</p><button id="retry">Попробовать снова</button></div>';
+  document.getElementById('retry').addEventListener('click', load);
+}
+
+function renderFilters(){
+  filtersEl.hidden = false;
+  filtersEl.innerHTML = CATEGORIES.map(c => '<button class="chip'+(c===activeFilter?' on':'')+'" data-cat="'+c+'">'+c+'</button>').join('');
+  filtersEl.querySelectorAll('.chip').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ activeFilter = btn.dataset.cat; renderFilters(); renderFeed(); });
+  });
+}
+
+function renderFeed(){
+  const items = activeFilter==='Всё' ? allItems : allItems.filter(x=>x.category===activeFilter);
+  if(!items.length){
+    feed.innerHTML = '<div class="ending"><div class="rule"></div><div class="big">В этой рубрике пока тихо</div><div class="sub">Выберите «Всё», чтобы увидеть полную сводку.</div></div>';
+    return;
+  }
+  const cards = items.map((it,idx)=>
+    '<article class="card reveal" style="animation-delay:'+(idx*55)+'ms">'+
+      '<span class="eyebrow">'+escapeHtml(it.category||'Новость')+'</span>'+
+      '<h2>'+escapeHtml(it.title)+'</h2>'+
+      '<p>'+escapeHtml(it.summary)+'</p>'+
+      '<div class="meta"><span class="src">'+escapeHtml(it.source||'источники')+'</span>'+
+      (it.time_ago?'<span class="dot"></span><span>'+escapeHtml(it.time_ago)+'</span>':'')+'</div>'+
+    '</article>'
+  ).join('');
+  const ending =
+    '<div class="ending reveal" style="animation-delay:'+(items.length*55+80)+'ms">'+
+      '<div class="rule"></div><div class="big">Конец сводки</div>'+
+      '<div class="sub">Это всё важное на сейчас. Можно отложить телефон.</div></div>';
+  feed.innerHTML = '<div class="feed">'+cards+'</div>'+ending;
+}
+
+async function load(){
+  showLoading();
+  refreshBtn.classList.add('spinning');
+  try{
+    // ?t= — чтобы браузер не показывал устаревшую кэшированную версию
+    const res = await fetch('./svodka.json?t=' + Date.now(), { cache: 'no-store' });
+    if(res.status === 404) throw new Error('Файл svodka.json ещё не создан. Запустите сборку в Actions (Run workflow).');
+    if(!res.ok) throw new Error('Не удалось загрузить svodka.json ('+res.status+').');
+    const data = await res.json();
+    allItems = Array.isArray(data.items) ? data.items.filter(x=>x && x.title && x.summary) : [];
+    if(!allItems.length) throw new Error('Сводка пуста. Проверьте лог последней сборки в Actions.');
+    if(data.updated){
+      const u = new Date(data.updated);
+      document.getElementById('upd').textContent = 'обновлено ' + u.toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+    }
+    activeFilter = 'Всё';
+    renderFilters();
+    renderFeed();
+  }catch(err){
+    showError(err.message || 'Что-то пошло не так.');
+  }finally{
+    refreshBtn.classList.remove('spinning');
+  }
+}
+
+refreshBtn.addEventListener('click', load);
+load();
+</script>
+</body>
+</html>
