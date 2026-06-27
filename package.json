@@ -1,9 +1,9 @@
 {
   "name": "svodka",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Сборщик утренней новостной сводки: RSS -> отбор главного через Claude -> svodka.json",
+  "description": "Накопительный архив важных новостей: RSS -> отбор главного через Claude -> svodka.json",
   "scripts": {
     "build": "node build.mjs"
   },

@@ -47,6 +47,13 @@
   .chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
 
+  .daygroup{margin-bottom:20px}
+  .dayhead{display:flex;align-items:center;gap:10px;padding:2px 4px 12px}
+  .dayhead .lbl{font-family:var(--display);font-weight:700;font-size:13px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--muted)}
+  .dayhead .ln{flex:1;height:1px;background:var(--line)}
+  .dayhead .cnt{font-size:12px;color:var(--faint)}
+
   .feed{display:flex;flex-direction:column;gap:12px}
   .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px 20px 17px;box-shadow:var(--shadow)}
   .card .eyebrow{display:inline-block;font-size:11.5px;font-weight:600;letter-spacing:.09em;
@@ -120,6 +127,40 @@ let allItems = [], activeFilter = 'Всё';
 
 function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
+// Дата записи: дата публикации, иначе момент добавления в архив.
+function itemDate(it){
+  const d = new Date(it.iso || it.added || 0);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// Короткая метка времени для карточки.
+function timeLabel(d){
+  if(!d) return '';
+  const diff = Date.now() - d.getTime();
+  const h = Math.floor(diff/3600000);
+  if(h < 1) return 'только что';
+  if(h < 24) return h + ' ч назад';
+  return d.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'});
+}
+
+// Заголовок секции дня: Сегодня / Вчера / «25 июня».
+function dayLabel(d){
+  if(!d) return 'Ранее';
+  const today = new Date(); today.setHours(0,0,0,0);
+  const that  = new Date(d);  that.setHours(0,0,0,0);
+  const days = Math.round((today - that)/86400000);
+  if(days <= 0) return 'Сегодня';
+  if(days === 1) return 'Вчера';
+  const opts = {day:'numeric', month:'long'};
+  if(that.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+  return d.toLocaleDateString('ru-RU', opts);
+}
+function dayKey(d){
+  if(!d) return '0000-00-00';
+  const x = new Date(d); x.setHours(0,0,0,0);
+  return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
+}
+
 function showLoading(){
   filtersEl.hidden = true;
   feed.innerHTML =
@@ -141,26 +182,50 @@ function renderFilters(){
   });
 }
 
+function cardHtml(it, idx){
+  const d = itemDate(it);
+  const t = timeLabel(d);
+  return '<article class="card reveal" style="animation-delay:'+(Math.min(idx,12)*45)+'ms">'+
+      '<span class="eyebrow">'+escapeHtml(it.category||'Новость')+'</span>'+
+      '<h2>'+escapeHtml(it.title)+'</h2>'+
+      '<p>'+escapeHtml(it.summary)+'</p>'+
+      '<div class="meta"><span class="src">'+escapeHtml(it.source||'источники')+'</span>'+
+      (t?'<span class="dot"></span><span>'+escapeHtml(t)+'</span>':'')+'</div>'+
+    '</article>';
+}
+
 function renderFeed(){
   const items = activeFilter==='Всё' ? allItems : allItems.filter(x=>x.category===activeFilter);
   if(!items.length){
     feed.innerHTML = '<div class="ending"><div class="rule"></div><div class="big">В этой рубрике пока тихо</div><div class="sub">Выберите «Всё», чтобы увидеть полную сводку.</div></div>';
     return;
   }
-  const cards = items.map((it,idx)=>
-    '<article class="card reveal" style="animation-delay:'+(idx*55)+'ms">'+
-      '<span class="eyebrow">'+escapeHtml(it.category||'Новость')+'</span>'+
-      '<h2>'+escapeHtml(it.title)+'</h2>'+
-      '<p>'+escapeHtml(it.summary)+'</p>'+
-      '<div class="meta"><span class="src">'+escapeHtml(it.source||'источники')+'</span>'+
-      (it.time_ago?'<span class="dot"></span><span>'+escapeHtml(it.time_ago)+'</span>':'')+'</div>'+
-    '</article>'
-  ).join('');
+
+  // Группировка по дням (новые сверху).
+  const order = [];
+  const groups = new Map();
+  for(const it of items){
+    const k = dayKey(itemDate(it));
+    if(!groups.has(k)){ groups.set(k, []); order.push(k); }
+    groups.get(k).push(it);
+  }
+
+  let idx = 0;
+  const html = order.map(k=>{
+    const list = groups.get(k);
+    const d = itemDate(list[0]);
+    const head =
+      '<div class="dayhead"><span class="lbl">'+escapeHtml(dayLabel(d))+'</span>'+
+      '<span class="ln"></span><span class="cnt">'+list.length+'</span></div>';
+    const cards = '<div class="feed">'+list.map(it=>cardHtml(it, idx++)).join('')+'</div>';
+    return '<section class="daygroup">'+head+cards+'</section>';
+  }).join('');
+
   const ending =
-    '<div class="ending reveal" style="animation-delay:'+(items.length*55+80)+'ms">'+
-      '<div class="rule"></div><div class="big">Конец сводки</div>'+
-      '<div class="sub">Это всё важное на сейчас. Можно отложить телефон.</div></div>';
-  feed.innerHTML = '<div class="feed">'+cards+'</div>'+ending;
+    '<div class="ending"><div class="rule"></div><div class="big">Конец архива</div>'+
+    '<div class="sub">Всего в сводке: '+items.length+'. Новое появится сверху после следующего обновления.</div></div>';
+
+  feed.innerHTML = html + ending;
 }
 
 async function load(){
@@ -173,6 +238,11 @@ async function load(){
     if(!res.ok) throw new Error('Не удалось загрузить svodka.json ('+res.status+').');
     const data = await res.json();
     allItems = Array.isArray(data.items) ? data.items.filter(x=>x && x.title && x.summary) : [];
+    // Архив сортируем по дате на всякий случай (новые сверху).
+    allItems.sort((a,b)=>{
+      const da = itemDate(a), db = itemDate(b);
+      return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+    });
     if(!allItems.length) throw new Error('Сводка пуста. Проверьте лог последней сборки в Actions.');
     if(data.updated){
       const u = new Date(data.updated);

@@ -1,14 +1,25 @@
-// Сборщик сводки: RSS -> дедупликация -> отбор главного через Claude Haiku -> svodka.json
+// Сборщик сводки: RSS -> дедупликация -> отбор главного через Claude Haiku -> архив svodka.json
+//
+// Отличие от прежней версии: svodka.json больше НЕ перезаписывается целиком.
+// Это накопительный АРХИВ. При каждом запуске:
+//   1. читаем RSS и убираем дубли внутри прогона;
+//   2. выбрасываем новости, которые уже лежат в архиве (по ключу);
+//   3. отдаём модели ТОЛЬКО свежие, ещё не виденные заголовки;
+//   4. модель отбирает ВСЕ важные события по теме (без жёсткого лимита в 6 штук);
+//   5. отобранное добавляется в начало архива, старое сохраняется.
+//
 // Запускается в GitHub Actions по расписанию. Требует переменную окружения ANTHROPIC_API_KEY.
 
 import Parser from 'rss-parser';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, readFile } from 'node:fs/promises';
 
 // ── Настройки ──────────────────────────────────────────────────────────────
 const MODEL = 'claude-haiku-4-5';   // самая дешёвая текущая модель ($1/$5 за млн токенов)
-const PICK = 6;                     // сколько новостей оставить в сводке
-const MAX_CANDIDATES = 45;          // сколько кандидатов отдать модели на отбор
-const FRESH_HOURS = 36;             // насколько свежими считать новости
+const ARCHIVE = 'svodka.json';      // файл-архив (его же читает дашборд)
+const MAX_CANDIDATES = 60;          // верхний предел НОВЫХ кандидатов, отдаваемых модели за прогон
+const FRESH_HOURS = 36;             // насколько свежими считать новости из RSS
+const KEEP_DAYS = 30;               // сколько дней хранить новость в архиве (старое подчищается)
+const MAX_ITEMS = 800;              // жёсткий потолок размера архива (защита от разрастания)
 
 // Источники. Google News RSS на русском агрегирует множество изданий и сам
 // частично группирует события. BBC — надёжная прямая лента. Можно добавлять свои.
@@ -34,6 +45,8 @@ function cleanTitle(title) {
   return (title || '').replace(/\s-\s[^-]{2,40}$/, '').trim();
 }
 
+// Нормализованный ключ для дедупликации. Это же значение хранится в архиве,
+// чтобы при следующих запусках можно было отсеять уже виденные новости.
 function normKey(title) {
   return cleanTitle(title)
     .toLowerCase()
@@ -57,9 +70,10 @@ async function collect() {
         const when = it.isoDate ? Date.parse(it.isoDate) : NaN;
         if (!Number.isNaN(when) && when < cutoff) continue;        // отсекаем несвежее
         const key = normKey(it.title);
-        if (!key || seen.has(key)) continue;                       // дедупликация
+        if (!key || seen.has(key)) continue;                       // дедупликация внутри прогона
         seen.add(key);
         items.push({
+          key,
           title: cleanTitle(it.title),
           source: sourceFromItem(it) || 'источник',
           snippet: (it.contentSnippet || '').replace(/\s+/g, ' ').slice(0, 220),
@@ -70,23 +84,44 @@ async function collect() {
       console.error('Не удалось прочитать ленту:', url, '—', e.message);
     }
   }
+  return items;
+}
 
-  // свежее — выше; берём верхушку как кандидатов для модели
-  items.sort((a, b) => (Date.parse(b.iso) || 0) - (Date.parse(a.iso) || 0));
-  return items.slice(0, MAX_CANDIDATES);
+// ── Архив ────────────────────────────────────────────────────────────────────
+async function loadArchive() {
+  try {
+    const raw = await readFile(ARCHIVE, 'utf8');
+    const data = JSON.parse(raw);
+    const items = Array.isArray(data.items) ? data.items : [];
+    // Бэкфилл для записей из старого формата (без key / added).
+    const fallbackAdded = data.updated || new Date().toISOString();
+    for (const it of items) {
+      if (!it.key) it.key = normKey(it.title || '');
+      if (!it.added) it.added = it.iso || fallbackAdded;
+    }
+    return items;
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error('Не удалось прочитать архив, начинаю с пустого:', e.message);
+    return []; // первого запуска ещё не было — это нормально
+  }
+}
+
+// дата для сортировки/группировки: дата публикации, иначе момент добавления
+function dateOf(it) {
+  return it.iso || it.added || '';
+}
+
+function prune(items) {
+  const cutoff = Date.now() - KEEP_DAYS * 86400 * 1000;
+  const fresh = items.filter(it => {
+    const t = Date.parse(dateOf(it));
+    return Number.isNaN(t) ? true : t >= cutoff; // без даты — оставляем
+  });
+  fresh.sort((a, b) => (Date.parse(dateOf(b)) || 0) - (Date.parse(dateOf(a)) || 0));
+  return fresh.slice(0, MAX_ITEMS);
 }
 
 // ── Отбор и саммаризация через Claude ────────────────────────────────────────
-function ageRu(iso) {
-  if (!iso) return 'сегодня';
-  const diff = Date.now() - Date.parse(iso);
-  if (Number.isNaN(diff)) return 'сегодня';
-  const h = Math.floor(diff / 3600000);
-  if (h < 1) return 'только что';
-  if (h < 24) return `${h} ч назад`;
-  return 'сегодня';
-}
-
 function extractJson(text) {
   let t = (text || '').trim().replace(/```json/gi, '').replace(/```/g, '').trim();
   const a = t.indexOf('['), b = t.lastIndexOf(']');
@@ -102,17 +137,22 @@ async function summarize(candidates) {
     .map((c, i) => `${i + 1}. [${c.source}] ${c.title}${c.snippet ? ' — ' + c.snippet : ''}`)
     .join('\n');
 
+  // Критерии важности оставлены прежними. Изменено только одно: не «ровно 6»,
+  // а «все действительно важные» события из переданного (уже свежего) списка.
   const prompt =
-    'Ты — редактор утренней новостной сводки. Ниже список заголовков из RSS за последние сутки.\n' +
-    'Отбери ' + PICK + ' ДЕЙСТВИТЕЛЬНО самых важных мировых и политических событий: большая политика, ' +
+    'Ты — редактор новостной ленты важных событий. Ниже список свежих заголовков из RSS, ' +
+    'которых ещё не было в ленте раньше.\n' +
+    'Отбери ВСЕ ДЕЙСТВИТЕЛЬНО важные мировые и политические события: большая политика, ' +
     'международные отношения, конфликты, крупная экономика. В приоритете события, которые встречаются ' +
-    'в списке несколько раз или явно широко освещаются. Игнорируй развлечения, спорт, светскую хронику и мелочи.\n' +
+    'в списке несколько раз или явно широко освещаются. Игнорируй развлечения, спорт, светскую хронику ' +
+    'и мелочи. Не придумывай и не добавляй ничего, чего нет в списке. Если важных событий мало — верни мало; ' +
+    'если их нет совсем — верни пустой массив [].\n' +
     'Для каждого выбранного события верни объект с полями:\n' +
     '"title" — краткий заголовок (до 9 слов, без точки в конце),\n' +
     '"summary" — РОВНО одно предложение: что именно случилось и почему это важно,\n' +
     '"category" — одно слово из набора: Мир, Политика, Экономика, Конфликты,\n' +
     '"source" — название издания из списка.\n' +
-    'Все тексты на русском. Ответь ТОЛЬКО валидным JSON-массивом из ' + PICK + ' объектов, без markdown и пояснений.\n\n' +
+    'Все тексты на русском. Ответь ТОЛЬКО валидным JSON-массивом объектов, без markdown и пояснений.\n\n' +
     'СПИСОК:\n' + list;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -124,7 +164,7 @@ async function summarize(candidates) {
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 1500,
+      max_tokens: 3000,
       messages: [{ role: 'user', content: prompt }],
     }),
   });
@@ -136,34 +176,68 @@ async function summarize(candidates) {
   const data = await res.json();
   const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
   const picked = extractJson(text);
-  if (!Array.isArray(picked) || !picked.length) throw new Error('Модель вернула пустой результат.');
+  if (!Array.isArray(picked)) throw new Error('Модель вернула не массив.');
 
-  // проставляем «N ч назад» по исходным датам, если найдём совпадение по заголовку
+  const now = new Date().toISOString();
+  // Сопоставляем выбранное с исходными кандидатами — берём оттуда дату и источник.
   return picked.filter(p => p && p.title && p.summary).map(p => {
-    const match = candidates.find(c => normKey(c.title) === normKey(p.title));
+    const match = candidates.find(c => c.key === normKey(p.title))
+      || candidates.find(c => normKey(c.title) === normKey(p.title));
     return {
+      key: normKey(p.title),
       title: String(p.title),
       summary: String(p.summary),
       category: String(p.category || 'Мир'),
       source: String(p.source || (match ? match.source : 'источники')),
-      time_ago: match ? ageRu(match.iso) : 'сегодня',
+      iso: match ? match.iso : '',   // дата публикации (для группировки/времени на дашборде)
+      added: now,                    // когда новость попала в архив
     };
   });
 }
 
 // ── Главное ──────────────────────────────────────────────────────────────────
 async function main() {
-  const candidates = await collect();
-  console.log(`Кандидатов после дедупликации: ${candidates.length}`);
-  if (!candidates.length) throw new Error('RSS не дал свежих новостей. Прерываюсь, чтобы не затирать прошлую сводку.');
+  const archive = await loadArchive();
+  const archivedKeys = new Set(archive.map(it => it.key));
+  console.log(`В архиве уже ${archive.length} новостей.`);
 
-  const items = await summarize(candidates);
-  const out = { updated: new Date().toISOString(), items };
-  await writeFile('svodka.json', JSON.stringify(out, null, 2), 'utf8');
-  console.log(`Готово: записано ${items.length} новостей в svodka.json`);
+  const collected = await collect();
+  console.log(`Свежих заголовков из RSS (после дедупликации внутри прогона): ${collected.length}`);
+
+  // Оставляем только то, чего ещё нет в архиве.
+  let candidates = collected.filter(c => !archivedKeys.has(c.key));
+  candidates.sort((a, b) => (Date.parse(b.iso) || 0) - (Date.parse(a.iso) || 0));
+  candidates = candidates.slice(0, MAX_CANDIDATES);
+  console.log(`Новых (ещё не виденных) кандидатов для модели: ${candidates.length}`);
+
+  if (!candidates.length) {
+    console.log('Новых новостей нет — архив оставляю без изменений.');
+    return; // ничего не пишем -> в Actions не будет лишнего коммита
+  }
+
+  const picked = await summarize(candidates);
+  // Финальная защита от дублей: вдруг модель вернула что-то уже лежащее в архиве.
+  const fresh = picked.filter(p => p.key && !archivedKeys.has(p.key));
+  console.log(`Модель отобрала важных событий: ${picked.length}, из них новых: ${fresh.length}`);
+
+  if (!fresh.length) {
+    console.log('Среди свежих заголовков важного не нашлось — архив без изменений.');
+    return;
+  }
+
+  const merged = prune([...fresh, ...archive]); // новое — в начало, затем чистка по возрасту/потолку
+  const out = {
+    updated: new Date().toISOString(),
+    count: merged.length,
+    items: merged,
+  };
+  await writeFile(ARCHIVE, JSON.stringify(out, null, 2), 'utf8');
+  console.log(`Готово: добавлено ${fresh.length}, всего в архиве ${merged.length}.`);
 }
 
-main().catch(err => {
-  console.error('Сборка не удалась:', err.message);
-  process.exit(1); // ненулевой код -> Action подсветит ошибку, прошлый svodka.json останется
-});
+main()
+  .then(() => process.exit(0)) // явный выход: не ждём «висящие» сетевые сокеты rss-parser
+  .catch(err => {
+    console.error('Сборка не удалась:', err.message);
+    process.exit(1); // ненулевой код -> Action подсветит ошибку, прошлый архив останется нетронутым
+  });
