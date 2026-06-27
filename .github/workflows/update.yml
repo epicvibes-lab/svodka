@@ -3,13 +3,19 @@ name: Update svodka
 on:
   schedule:
     # 05:00 UTC ежедневно (~08:00 Москва, 09:00 Тбилиси).
-    # Не ставь ровно на :00 часа без причины — в пик возможны задержки.
-    # Чаще: '0 */6 * * *' (каждые 6 часов). Реже — измени строку ниже.
+    # Архив накопительный, поэтому запускать можно чаще без потери прошлых новостей:
+    # каждые 6 часов — '0 */6 * * *', каждый час — '0 * * * *'. Время в UTC.
     - cron: '0 5 * * *'
   workflow_dispatch:        # позволяет запускать вручную из вкладки Actions
 
 permissions:
-  contents: write           # нужно, чтобы коммитить обновлённый svodka.json
+  contents: write           # нужно, чтобы коммитить обновлённый архив svodka.json
+
+# Защита от наложения запусков: если новый старт пришёл, пока идёт прошлый —
+# он дождётся завершения. Так два прогона не перезапишут архив друг друга.
+concurrency:
+  group: svodka-update
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -31,14 +37,16 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: node build.mjs
 
-      - name: Commit updated digest
+      - name: Commit updated archive
         run: |
           git config user.name "svodka-bot"
           git config user.email "actions@users.noreply.github.com"
           git add svodka.json
           if git diff --staged --quiet; then
-            echo "Изменений нет — коммит не нужен."
+            echo "Новых новостей нет — коммит не нужен."
           else
-            git commit -m "Update svodka $(date -u +%FT%TZ)"
+            git commit -m "Update svodka archive $(date -u +%FT%TZ)"
+            # На случай, если параллельный коммит успел уйти в ветку.
+            git pull --rebase --autostash || true
             git push
           fi
